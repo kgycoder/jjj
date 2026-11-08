@@ -33,6 +33,20 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private val nodes = HashMap<Int, AccessibilityNodeInfo>()
 
+    // Agent Action Cursor (접근성 오버레이)
+    private var cursorInst: AgentCursorOverlay? = null
+    private val cursor: AgentCursorOverlay
+        get() = cursorInst ?: AgentCursorOverlay(this).also { cursorInst = it }
+
+    fun cursorShow(label: String) { cursor.show(); cursor.setLabel(label) }
+    fun cursorLabel(label: String) { cursorInst?.setLabel(label) }
+    fun cursorHide(delayMs: Long = 0) { cursorInst?.hide(delayMs) }
+
+    private suspend fun cursorMoveTo(x: Float, y: Float) {
+        cursor.show()
+        cursor.moveTo(x, y)
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
@@ -40,6 +54,8 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
+        cursorInst?.destroy()
+        cursorInst = null
         instance = null
         _connected.value = false
         return super.onUnbind(intent)
@@ -125,52 +141,59 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private suspend fun tap(c: JSONObject, longPress: Boolean): String {
         val id = c.optInt("id", -1)
+        var node: AccessibilityNodeInfo? = null
+        val x: Float
+        val y: Float
         if (id > 0) {
-            val node = nodes[id] ?: return "error: id $id 는 최신 DEVICE_STATE 에 없음(만료)"
-            if (!longPress) {
-                var n: AccessibilityNodeInfo? = node
-                while (n != null && !n.isClickable) n = n.parent
-                if (n != null && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    delay(500); return "ok: clicked id $id"
-                }
-            }
-            val r = Rect(); node.getBoundsInScreen(r)
-            val ok = gesture(point(r.centerX().toFloat(), r.centerY().toFloat()), if (longPress) 700 else 50)
-            delay(500)
-            return if (ok) "ok: ${if (longPress) "long-pressed" else "tapped"} id $id at (${r.centerX()},${r.centerY()})" else "error: gesture failed"
+            val nd = nodes[id] ?: return "error: id $id 는 최신 DEVICE_STATE 에 없음(만료)"
+            node = nd
+            val r = Rect(); nd.getBoundsInScreen(r)
+            x = r.centerX().toFloat(); y = r.centerY().toFloat()
+        } else {
+            if (!c.has("x") || !c.has("y")) return "error: tap requires id or x,y"
+            x = c.getDouble("x").toFloat(); y = c.getDouble("y").toFloat()
         }
-        if (!c.has("x") || !c.has("y")) return "error: tap requires id or x,y"
-        val x = c.getDouble("x").toFloat(); val y = c.getDouble("y").toFloat()
+        cursorMoveTo(x, y)
+        cursor.press()
+        if (node != null && !longPress) {
+            var n: AccessibilityNodeInfo? = node
+            while (n != null && !n.isClickable) n = n.parent
+            if (n != null && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                delay(450); return "ok: clicked id $id"
+            }
+        }
         val ok = gesture(point(x, y), if (longPress) 700 else 50)
-        delay(500)
-        return if (ok) "ok: ${if (longPress) "long-pressed" else "tapped"} ($x,$y)" else "error: gesture failed"
+        delay(450)
+        val what = if (longPress) "long-pressed" else "tapped"
+        return if (ok) "ok: $what (${x.toInt()},${y.toInt()})" else "error: gesture failed"
     }
 
     private suspend fun swipe(c: JSONObject): String {
-        val p = Path().apply {
-            moveTo(c.getDouble("x1").toFloat(), c.getDouble("y1").toFloat())
-            lineTo(c.getDouble("x2").toFloat(), c.getDouble("y2").toFloat())
-        }
-        val ok = gesture(p, c.optLong("duration_ms", 350).coerceIn(50, 3000))
+        val x1 = c.getDouble("x1").toFloat(); val y1 = c.getDouble("y1").toFloat()
+        val x2 = c.getDouble("x2").toFloat(); val y2 = c.getDouble("y2").toFloat()
+        return swipeInternal(x1, y1, x2, y2, c.optLong("duration_ms", 350).coerceIn(50, 3000), "swiped")
+    }
+
+    private suspend fun swipeInternal(x1: Float, y1: Float, x2: Float, y2: Float, dur: Long, label: String): String {
+        cursorMoveTo(x1, y1)
+        val p = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
+        cursor.glideTo(x2, y2) // 제스처가 진행되는 동안 커서도 같이 이동
+        val ok = gesture(p, dur)
         delay(500)
-        return if (ok) "ok: swiped" else "error: gesture failed"
+        return if (ok) "ok: $label" else "error: gesture failed"
     }
 
     /** direction = 콘텐츠를 이동하고 싶은 방향 (down: 페이지 아래쪽으로 = 손가락은 위로). */
     private suspend fun scroll(direction: String): String {
         val dm = resources.displayMetrics
         val w = dm.widthPixels.toFloat(); val h = dm.heightPixels.toFloat()
-        val p = Path()
-        when (direction.lowercase()) {
-            "down" -> { p.moveTo(w / 2, h * 0.72f); p.lineTo(w / 2, h * 0.28f) }
-            "up" -> { p.moveTo(w / 2, h * 0.28f); p.lineTo(w / 2, h * 0.72f) }
-            "right" -> { p.moveTo(w * 0.8f, h / 2); p.lineTo(w * 0.2f, h / 2) }
-            "left" -> { p.moveTo(w * 0.2f, h / 2); p.lineTo(w * 0.8f, h / 2) }
-            else -> return "error: direction must be up/down/left/right"
+        return when (direction.lowercase()) {
+            "down" -> swipeInternal(w / 2, h * 0.72f, w / 2, h * 0.28f, 350, "scrolled down")
+            "up" -> swipeInternal(w / 2, h * 0.28f, w / 2, h * 0.72f, 350, "scrolled up")
+            "right" -> swipeInternal(w * 0.8f, h / 2, w * 0.2f, h / 2, 350, "scrolled right")
+            "left" -> swipeInternal(w * 0.2f, h / 2, w * 0.8f, h / 2, 350, "scrolled left")
+            else -> "error: direction must be up/down/left/right"
         }
-        val ok = gesture(p, 350)
-        delay(600)
-        return if (ok) "ok: scrolled $direction" else "error: gesture failed"
     }
 
     private suspend fun typeText(c: JSONObject): String {
@@ -182,6 +205,11 @@ class AgentAccessibilityService : AccessibilityService() {
                 ?: nodes.values.firstOrNull { it.isEditable }
         }
         if (node == null) return "error: 입력 가능한 필드를 찾지 못함 (먼저 필드를 tap 하세요)"
+        val r = Rect(); node.getBoundsInScreen(r)
+        if (r.width() > 0 && r.height() > 0) {
+            cursorMoveTo(r.centerX().toFloat(), r.centerY().toFloat())
+            cursor.press()
+        }
         if (!node.isFocused) node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         val base = if (c.optBoolean("append", false) && !node.isShowingHintText) node.text?.toString().orEmpty() else ""
         val args = Bundle().apply {
