@@ -52,6 +52,7 @@ class AgentViewModel : ViewModel() {
                 runAgent(t, idx)
             } finally {
                 running = false
+                AgentAccessibilityService.instance?.cursorHide(1300)
             }
         }
     }
@@ -134,17 +135,22 @@ class AgentViewModel : ViewModel() {
                     )
                 }
 
+                val svc = AgentAccessibilityService.instance
+                if (block.commands.isNotEmpty()) svc?.cursorShow(block.summary.ifBlank { "작업 중" })
                 val results = if (block.commands.isNotEmpty()) executeAll(block.commands) else "[]"
 
                 when (block.status) {
-                    "done" -> { finish(idx, parsed.visible.ifBlank { block.summary }, false); return }
-                    "failed" -> { finish(idx, parsed.visible.ifBlank { block.summary }, true); return }
-                    "need_user" -> { finish(idx, parsed.visible.ifBlank { block.summary }, false); return }
+                    "done" -> {
+                        svc?.cursorLabel("작업 완료"); finish(idx, parsed.visible.ifBlank { block.summary }, false); return }
+                    "failed" -> { svc?.cursorLabel("작업 실패"); finish(idx, parsed.visible.ifBlank { block.summary }, true); return }
+                    "need_user" -> { svc?.cursorLabel("확인이 필요해요"); finish(idx, parsed.visible.ifBlank { block.summary }, false); return }
                 }
+                svc?.cursorLabel("다음 작업 생각 중…")
                 delay(500)
                 outgoing = AgentPrompt.result(step, results, app)
             }
         } catch (e: CancellationException) {
+            AgentAccessibilityService.instance?.cursorLabel("중단됨")
             upd(idx) { it.copy(streaming = false, planning = false, text = it.text.ifBlank { "(중단됨)" }) }
             throw e
         } catch (e: Exception) {
