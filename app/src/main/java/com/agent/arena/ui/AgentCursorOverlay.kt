@@ -1,17 +1,15 @@
 package com.agent.arena
 
 import android.accessibilityservice.AccessibilityService
+import android.animation.ArgbEvaluator
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.CornerPathEffect
-import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
-import android.graphics.RadialGradient
 import android.graphics.RectF
-import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.Build
 import android.os.SystemClock
@@ -24,11 +22,20 @@ import android.view.WindowManager
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.sin
+
+/** 작업 상태 → 색상. */
+enum class CursorState(val color: Int) {
+    WORKING(0xFF3B82F6.toInt()),   // 작업 중: 블루
+    THINKING(0xFF6B7280.toInt()),  // 다음 작업 생각 중: 슬레이트
+    DONE(0xFF22A06B.toInt()),      // 완료: 그린
+    FAILED(0xFFE5484D.toInt()),    // 실패: 레드
+    ASK(0xFFF59E0B.toInt()),       // 사용자 확인 필요: 앰버
+    STOPPED(0xFF9CA3AF.toInt()),   // 중단: 라이트 그레이
+}
 
 /**
  * Agent Action Cursor.
- * 접근성 오버레이 창(권한 불필요, 터치 비차단)에 부드러운 커서 + 현재 작업 요약 라벨을 그린다.
+ * 접근성 오버레이 창(권한 불필요, 터치 비차단)에 단색 커서 + 현재 작업 요약 라벨을 그린다.
  */
 class AgentCursorOverlay(private val service: AccessibilityService) {
 
@@ -81,7 +88,9 @@ class AgentCursorOverlay(private val service: AccessibilityService) {
         view?.let { remove(it) }
     }
 
-    fun setLabel(text: String) { view?.setLabel(text) }
+    fun setLabel(text: String, state: CursorState = CursorState.WORKING) {
+        view?.setLabel(text, state)
+    }
 
     /** 커서를 (x,y)로 부드럽게 이동하고, 도착할 때까지 대기. */
     suspend fun moveTo(x: Float, y: Float) {
@@ -95,7 +104,7 @@ class AgentCursorOverlay(private val service: AccessibilityService) {
     /** 대기하지 않고 목표만 갱신(스와이프 중 커서가 따라가게 할 때). */
     fun glideTo(x: Float, y: Float) { view?.setTarget(x, y) }
 
-    /** 탭 효과(눌림 + 잔물결). */
+    /** 탭 효과(눌림 + 얇은 링). */
     suspend fun press() {
         val v = view ?: return
         v.press()
@@ -137,9 +146,6 @@ private class CursorView(ctx: Context) : View(ctx) {
     private val d = resources.displayMetrics.density
     private val fontScale = resources.configuration.fontScale
 
-    private val c1 = 0xFF5B6CFF.toInt()
-    private val c2 = 0xFFA78BFA.toInt()
-
     // ---- 상태(스프링)
     private val px = Sp(0f, 15f)
     private val py = Sp(0f, 15f)
@@ -148,6 +154,7 @@ private class CursorView(ctx: Context) : View(ctx) {
     private val flipX = Sp(0f, 16f)
     private val flipY = Sp(0f, 16f)
     private val pillW = Sp(0f, 20f)
+    private val colorT = Sp(1f, 14f)
 
     private var placed = false
     private var pendX = 0f
@@ -160,12 +167,18 @@ private class CursorView(ctx: Context) : View(ctx) {
     private var pulseStart = -10_000L
     private var onHidden: (() -> Unit)? = null
 
+    // 색상 전환(상태가 바뀌면 이전 색 → 새 색으로 부드럽게)
+    private val evaluator = ArgbEvaluator()
+    private var state = CursorState.WORKING
+    private var colFrom = CursorState.WORKING.color
+    private var colTo = CursorState.WORKING.color
+
     private var lastFrame = 0L
     private val loc = IntArray(2)
     private val rect = RectF()
     private val clip = Path()
 
-    // ---- 페인트
+    // ---- 페인트 (단색, 효과 없음)
     private val arrow = Path().apply {
         moveTo(0f, 0f)
         lineTo(0f, 23f * d)
@@ -178,41 +191,27 @@ private class CursorView(ctx: Context) : View(ctx) {
     }
     private val arrowFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
-        shader = LinearGradient(0f, 0f, 17f * d, 27f * d, c1, c2, Shader.TileMode.CLAMP)
         pathEffect = CornerPathEffect(3f * d)
     }
     private val arrowStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         color = Color.WHITE
-        strokeWidth = 2.2f * d
+        strokeWidth = 2f * d
         strokeJoin = Paint.Join.ROUND
         pathEffect = CornerPathEffect(3f * d)
-    }
-    private val arrowShadow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        color = Color.BLACK
-        strokeJoin = Paint.Join.ROUND
-        pathEffect = CornerPathEffect(3f * d)
-    }
-    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        shader = RadialGradient(0f, 0f, 34f * d, intArrayOf(withA(c1, 90), withA(c2, 0)), null, Shader.TileMode.CLAMP)
     }
     private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 2f * d
-        color = c1
+        strokeWidth = 1.6f * d
     }
-    private val pillShadow = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
     private val pillFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
     private val pillStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 1f * d
-        color = Color.BLACK
+        strokeWidth = 1.2f * d
     }
-    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = c1 }
-    private val haloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = c1 }
+    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFF1C1C24.toInt()
+        color = 0xFF1F2937.toInt()
         textSize = 13.5f * d * fontScale
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
     }
@@ -241,12 +240,19 @@ private class CursorView(ctx: Context) : View(ctx) {
     fun isSettled() = px.settled(3f) && py.settled(3f)
 
     fun press() {
-        press.t = 0.8f
+        press.t = 0.82f
         pulseStart = SystemClock.uptimeMillis()
         postDelayed({ press.t = 1f }, 150)
     }
 
-    fun setLabel(t: String) {
+    fun setLabel(t: String, newState: CursorState) {
+        if (newState != state) {
+            colFrom = accent()
+            colTo = newState.color
+            state = newState
+            colorT.snap(0f)
+            colorT.t = 1f
+        }
         val nt = t.trim()
         if (nt == text) return
         prevText = text
@@ -255,6 +261,9 @@ private class CursorView(ctx: Context) : View(ctx) {
         val target = targetWidth()
         if (prevText.isBlank()) pillW.snap(target) else pillW.t = target
     }
+
+    private fun accent(): Int =
+        evaluator.evaluate(colorT.x.coerceIn(0f, 1f), colFrom, colTo) as Int
 
     // ------------------------------------------------------------------ 레이아웃/프레임
 
@@ -294,7 +303,7 @@ private class CursorView(ctx: Context) : View(ctx) {
             flipY.t = if (py.x + 24f * d + pillH > height - 44f * d) 1f else 0f
         }
         px.step(dt); py.step(dt); appear.step(dt); press.step(dt)
-        flipX.step(dt); flipY.step(dt); pillW.step(dt)
+        flipX.step(dt); flipY.step(dt); pillW.step(dt); colorT.step(dt)
         invalidate()
         Choreographer.getInstance().postFrameCallback(frameCb)
         if (appear.t == 0f && appear.x < 0.01f) {
@@ -314,52 +323,41 @@ private class CursorView(ctx: Context) : View(ctx) {
         c.translate(-loc[0].toFloat(), -loc[1].toFloat())
 
         val now = SystemClock.uptimeMillis()
-        val time = now / 1000f
-        val breath = 0.5f + 0.5f * sin(time * 2.4f)
-        val bx = px.x + sin(time * 1.7f) * 2.2f * d
-        val by = py.x + sin(time * 1.3f + 1.2f) * 2.2f * d
-        val s = (0.82f + 0.18f * a)
+        val accent = accent()
+        val bx = px.x
+        val by = py.x
+        val s = 0.86f + 0.14f * a
 
         c.save()
         c.scale(s, s, bx, by)
 
-        // 커서 본체
-        c.save()
-        c.translate(bx, by)
-        glow.alpha = (255 * a * (0.8f + 0.2f * breath)).toInt()
-        c.drawCircle(0f, 0f, 34f * d, glow)
-
-        val pt = (now - pulseStart) / 480f
+        // 탭 링(얇은 단색 링 하나)
+        val pt = (now - pulseStart) / 460f
         if (pt in 0f..1f) {
             val e = 1f - (1f - pt) * (1f - pt)
-            ring.alpha = (255 * 0.5f * (1f - pt) * a).toInt()
-            c.drawCircle(0f, 0f, (10f + 30f * e) * d, ring)
+            ring.color = accent
+            ring.alpha = (255 * 0.55f * (1f - pt) * a).toInt()
+            c.drawCircle(bx, by, (8f + 26f * e) * d, ring)
         }
 
+        // 커서 본체: 단색 채움 + 흰 윤곽선
         c.save()
+        c.translate(bx, by)
         val ps = press.x
         c.scale(ps, ps, 0f, 0f)
-        // 부드러운 그림자(겹친 스트로크)
-        c.save()
-        c.translate(1.2f * d, 3f * d)
-        arrowShadow.strokeWidth = 9f * d; arrowShadow.alpha = (14 * a).toInt()
-        c.drawPath(arrow, arrowShadow)
-        arrowShadow.strokeWidth = 5f * d; arrowShadow.alpha = (26 * a).toInt()
-        c.drawPath(arrow, arrowShadow)
-        c.restore()
+        arrowFill.color = accent
         arrowFill.alpha = (255 * a).toInt()
         arrowStroke.alpha = (255 * a).toInt()
         c.drawPath(arrow, arrowFill)
         c.drawPath(arrow, arrowStroke)
         c.restore()
-        c.restore()
 
-        drawPill(c, bx, by, a, breath, now)
+        drawPill(c, bx, by, a, accent, now)
         c.restore()
         c.restore()
     }
 
-    private fun drawPill(c: Canvas, bx: Float, by: Float, a: Float, breath: Float, now: Long) {
+    private fun drawPill(c: Canvas, bx: Float, by: Float, a: Float, accent: Int, now: Long) {
         if (text.isBlank() && prevText.isBlank()) return
         val w = max(pillW.x, pillH)
         val leftN = bx + 20f * d
@@ -372,28 +370,17 @@ private class CursorView(ctx: Context) : View(ctx) {
         rect.set(left, top, left + w, top + pillH)
         val r = pillH / 2f
 
-        // 부드러운 그림자
-        for (i in 1..5) {
-            val grow = i * 1.7f * d
-            pillShadow.alpha = (a * 13f * (6 - i) / 5f).toInt()
-            c.drawRoundRect(
-                rect.left - grow, rect.top - grow + i * 1.2f * d,
-                rect.right + grow, rect.bottom + grow + i * 1.2f * d,
-                r + grow, r + grow, pillShadow,
-            )
-        }
-        pillFill.alpha = (244 * a).toInt()
+        // 흰 캡슐 + 상태색 얇은 윤곽선 (그림자 없음)
+        pillFill.alpha = (248 * a).toInt()
         c.drawRoundRect(rect, r, r, pillFill)
-        pillStroke.alpha = (20 * a).toInt()
+        pillStroke.color = accent
+        pillStroke.alpha = (140 * a).toInt()
         c.drawRoundRect(rect, r, r, pillStroke)
 
-        // 상태 점(숨 쉬듯)
-        val dotCx = rect.left + padH + 3.5f * d
-        val dotCy = rect.centerY()
-        haloPaint.alpha = (a * 55f * (0.5f + 0.5f * breath)).toInt()
-        c.drawCircle(dotCx, dotCy, (6.5f + 2f * breath) * d, haloPaint)
+        // 상태 점(단색, 정적)
+        dotPaint.color = accent
         dotPaint.alpha = (255 * a).toInt()
-        c.drawCircle(dotCx, dotCy, 3.4f * d, dotPaint)
+        c.drawCircle(rect.left + padH + 3.5f * d, rect.centerY(), 3.5f * d, dotPaint)
 
         // 텍스트 크로스페이드(위로 밀려나며 교체)
         clip.reset()
@@ -413,6 +400,4 @@ private class CursorView(ctx: Context) : View(ctx) {
         c.drawText(shown(text), tx, baseline + 5f * d * (1f - ease), textPaint)
         c.restore()
     }
-
-    private fun withA(color: Int, alpha: Int) = (color and 0x00FFFFFF) or (alpha shl 24)
 }
