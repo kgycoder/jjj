@@ -265,15 +265,16 @@ class ArenaController(private val ctx: Context) {
         val markerArg = JSONObject.quote(t.marker)
         while (System.currentTimeMillis() - start < 240_000) {
             delay(250)
-            // 기본: 마커 기준. 마커를 6초 넘게 못 찾으면 폴백(baseline + 내 메시지 텍스트 제외)
-            var raw = js("__ag.snapshotAfter($markerArg)") ?: continue
-            var o = try { JSONObject(raw) } catch (e: Exception) { continue }
-            if (o.optInt("f", 0) == 0 && System.currentTimeMillis() - start > 6_000) {
-                raw = js("__ag.snapshotFallback(${t.baseline})") ?: continue
-                o = try { JSONObject(raw) } catch (e: Exception) { continue }
-            }
+            val raw = js("__ag.answer($markerArg)") ?: continue
+            val o = try { JSONObject(raw) } catch (e: Exception) { continue }
             val gen = o.optBoolean("g")
-            val text = o.optString("t")
+            // 마커 뒤 조각을 우선 사용. 없으면 6초 후부터 "전송 전에 없던 조각" 전체를 사용
+            val fromMarker = o.optString("a")
+            val text = when {
+                fromMarker.isNotBlank() -> fromMarker
+                System.currentTimeMillis() - start > 6_000 -> o.optString("c")
+                else -> ""
+            }
             if (gen) sawGenerating = true
             if (text != last) {
                 last = text
@@ -290,6 +291,8 @@ class ArenaController(private val ctx: Context) {
                 if (sawGenerating && idle >= 3 && text.isNotBlank()) break
                 if (!sawGenerating && text.isNotBlank() && stable >= 8) break
             }
+            // 중단 버튼 판별이 틀려 "생성 중"으로 고정되는 경우 대비: 텍스트가 10초간 변하지 않으면 완료로 간주
+            if (text.isNotBlank() && stable >= 40) break
         }
         CookieManager.getInstance().flush()
         return last
