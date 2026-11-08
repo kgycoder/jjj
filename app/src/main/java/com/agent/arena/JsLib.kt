@@ -72,6 +72,9 @@ return {
   setPrompt:function(text){
     var ta=document.querySelector(TA);if(!ta){return false;}
     window.__agPN=alnum(text);window.__agMN=null;
+    var bc={};var ss=segs();
+    for(var q=0;q<ss.length;q++){var kk=alnum(tidy(md(ss[q])));bc[kk]=(bc[kk]||0)+1;}
+    window.__agB=bc;
     ta.focus();
     var setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;
     setter.call(ta,text);
@@ -87,6 +90,25 @@ return {
     if(!b||b.getAttribute('aria-label')==='Send message'){return false;}b.click();return true;
   },
   segCount:function(){return segs().length;},
+  // 답변 추출(순서/개수 가정에 의존하지 않음)
+  //  a = 마커 뒤에 위치한 새 조각,  c = 전송 전에 없던 조각 중 내 텍스트가 아닌 모든 조각
+  answer:function(mk){
+    var m=findMarker(mk);var s=segs();
+    var bc={};var src=window.__agB||{};for(var key in src){bc[key]=src[key];}
+    var pn=window.__agPN||'';var A=[];var C=[];
+    for(var i=0;i<s.length;i++){
+      var e=s[i];var t=tidy(md(e));if(!t){continue;}
+      var k=alnum(t);
+      if(bc[k]>0){bc[k]--;continue;}
+      if(t.indexOf(mk)>=0){continue;}
+      var raw=isCode(e)?((e.querySelector('pre code')||e).textContent):t;
+      var a=alnum(raw);
+      if(a.length>=4&&pn.indexOf(a)>=0){continue;}
+      C.push(t);
+      if(m&&(m.compareDocumentPosition(e)&4)){A.push(t);}
+    }
+    return JSON.stringify({g:generating(),f:m?1:0,a:A.join('\n\n'),c:C.join('\n\n')});
+  },
   // 폴백: baseline 이후 조각 중 "내가 보낸 텍스트의 일부"인 것을 제외
   snapshotFallback:function(base){
     var pn=window.__agPN||'';var s=segs().slice(base);var out=[];
