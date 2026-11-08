@@ -38,8 +38,8 @@ class AgentAccessibilityService : AccessibilityService() {
     private val cursor: AgentCursorOverlay
         get() = cursorInst ?: AgentCursorOverlay(this).also { cursorInst = it }
 
-    fun cursorShow(label: String) { cursor.show(); cursor.setLabel(label) }
-    fun cursorLabel(label: String) { cursorInst?.setLabel(label) }
+    fun cursorShow(label: String) { cursor.show(); cursor.setLabel(label, CursorState.WORKING) }
+    fun cursorLabel(label: String, state: CursorState = CursorState.WORKING) { cursorInst?.setLabel(label, state) }
     fun cursorHide(delayMs: Long = 0) { cursorInst?.hide(delayMs) }
 
     private suspend fun cursorMoveTo(x: Float, y: Float) {
